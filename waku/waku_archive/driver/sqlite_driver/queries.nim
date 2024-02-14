@@ -3,7 +3,7 @@ when (NimMajor, NimMinor) < (1, 4):
 else:
   {.push raises: [].}
 
-import std/[options, sequtils], stew/[results, byteutils, arrayops], sqlite3_abi
+import std/[options, sequtils], stew/[results, byteutils], sqlite3_abi
 import
   ../../../common/databases/db_sqlite,
   ../../../common/databases/common,
@@ -286,7 +286,7 @@ proc combineClauses(clauses: varargs[Option[string]]): Option[string] =
   return some(where)
 
 proc whereClause(
-    cursor: Option[DbCursor],
+    cursor: Option[bool], # true v3, false v2
     pubsubTopic: Option[PubsubTopic],
     contentTopic: seq[ContentTopic],
     startTime: Option[Timestamp],
@@ -299,7 +299,10 @@ proc whereClause(
       none(string)
     else:
       let comp = if ascending: ">" else: "<"
-      some("(storedAt, id) " & comp & " (?, ?)")
+      if cursor.get():
+        some("(timestamp, messageHash) " & comp & " (?, ?)")
+      else:
+        some("(storedAt, id) " & comp & " (?, ?)")
 
   let pubsubTopicClause =
     if pubsubTopic.isNone():
@@ -360,12 +363,21 @@ proc selectMessagesWithLimitQuery(
   if where.isSome():
     query &= " WHERE " & where.get()
 
-  query &= " ORDER BY storedAt " & order & ", id " & order
+  query &= " ORDER BY storedAt " & order & ", messageHash " & order
   query &= " LIMIT " & $limit & ";"
 
   return query
 
-proc prepareSelectMessagesWithlimitStmt(
+proc selectMessageByHashQuery(): SqlQueryStr =
+  var query: string
+
+  query = "SELECT contentTopic, payload, version, timestamp, messageHash"
+  query &= " FROM " & DbTable
+  query &= " WHERE messageHash = (?)"
+
+  return query
+
+proc prepareStmt(
     db: SqliteDatabase, stmt: string
 ): DatabaseResult[SqliteStmt[void, void]] =
   var s: RawStmtPtr
@@ -374,7 +386,8 @@ proc prepareSelectMessagesWithlimitStmt(
 
 proc execSelectMessagesWithLimitStmt(
     s: SqliteStmt,
-    cursor: Option[DbCursor],
+    cursorv2: Option[DbCursor],
+    cursorv3: Option[(Timestamp, WakuMessageHash)],
     pubsubTopic: Option[PubsubTopic],
     contentTopic: seq[ContentTopic],
     startTime: Option[Timestamp],
@@ -387,8 +400,14 @@ proc execSelectMessagesWithLimitStmt(
   # Bind params
   var paramIndex = 1
 
-  if cursor.isSome(): # cursor = storedAt, id, pubsubTopic
-    let (storedAt, id, _) = cursor.get()
+  if cursorv3.isSome():
+    let (time, hash) = cursorv3.get()
+    checkErr bindParam(s, paramIndex, time)
+    paramIndex += 1
+    checkErr bindParam(s, paramIndex, toSeq(hash))
+    paramIndex += 1
+  elif cursorv2.isSome(): # cursorv2 = storedAt, id, pubsubTopic
+    let (storedAt, id, _, _) = cursorv2.get()
     checkErr bindParam(s, paramIndex, storedAt)
     paramIndex += 1
     checkErr bindParam(s, paramIndex, id)
@@ -404,13 +423,7 @@ proc execSelectMessagesWithLimitStmt(
     paramIndex += 1
 
   for hash in hashes:
-    let bytes: array[32, byte] = hash
-    var byteSeq: seq[byte]
-
-    let byteCount = copyFrom(byteSeq, bytes)
-    assert byteCount == 32
-
-    checkErr bindParam(s, paramIndex, byteSeq)
+    checkErr bindParam(s, paramIndex, toSeq(hash))
     paramIndex += 1
 
   if startTime.isSome():
@@ -438,6 +451,29 @@ proc execSelectMessagesWithLimitStmt(
     discard sqlite3_reset(s) # same return information as step
     discard sqlite3_clear_bindings(s) # no errors possible
 
+proc execSelectMessageByHash(
+    s: SqliteStmt, hash: WakuMessageHash, onRowCallback: DataProc
+): DatabaseResult[void] =
+  let s = RawStmtPtr(s)
+
+  checkErr bindParam(s, 1, toSeq(hash))
+
+  try:
+    while true:
+      let v = sqlite3_step(s)
+      case v
+      of SQLITE_ROW:
+        onRowCallback(s)
+      of SQLITE_DONE:
+        return ok()
+      else:
+        return err($sqlite3_errstr(v))
+  finally:
+    # release implicit transaction
+    discard sqlite3_reset(s) # same return information as step
+    discard sqlite3_clear_bindings(s)
+      # no errors possible                                                              
+
 proc selectMessagesByHistoryQueryWithLimit*(
     db: SqliteDatabase,
     contentTopic: seq[ContentTopic],
@@ -451,6 +487,30 @@ proc selectMessagesByHistoryQueryWithLimit*(
 ): DatabaseResult[
     seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)]
 ] =
+  # Store v3 cursor is only the hash of the message
+  # Must first get the message timestamp before paginating by time
+  var cursorv2 = cursor
+  var cursorv3 = none((Timestamp, WakuMessageHash))
+  if cursor.isSome() and cursor.get()[3] != EmptyWakuMessageHash:
+    let hash: WakuMessageHash = cursor.get()[3]
+
+    var wakuMessage: WakuMessage
+
+    proc queryRowCallback(s: ptr sqlite3_stmt) =
+      wakuMessage = queryRowWakuMessageCallback(
+        s, contentTopicCol = 0, payloadCol = 1, versionCol = 2, senderTimestampCol = 3
+      )
+
+    let query = selectMessageByHashQuery()
+    let dbStmt = ?db.prepareStmt(query)
+    ?dbStmt.execSelectMessageByHash(hash, queryRowCallback)
+    dbStmt.dispose()
+
+    let time: Timestamp = wakuMessage.timestamp
+
+    cursorv3 = some((time, hash))
+    cursorv2 = none(DbCursor)
+
   var messages: seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)] =
     @[]
   proc queryRowCallback(s: ptr sqlite3_stmt) =
@@ -466,14 +526,23 @@ proc selectMessagesByHistoryQueryWithLimit*(
     messages.add((pubsubTopic, message, digest, storedAt, hash))
 
   let query = block:
+    let cursorState =
+      if cursorv3.isSome():
+        some(true)
+      elif cursorv2.isSome():
+        some(false)
+      else:
+        none(bool)
+
     let where = whereClause(
-      cursor, pubsubTopic, contentTopic, startTime, endTime, hashes, ascending
+      cursorState, pubsubTopic, contentTopic, startTime, endTime, hashes, ascending
     )
     selectMessagesWithLimitQuery(DbTable, where, limit, ascending)
 
-  let dbStmt = ?db.prepareSelectMessagesWithlimitStmt(query)
+  let dbStmt = ?db.prepareStmt(query)
   ?dbStmt.execSelectMessagesWithLimitStmt(
-    cursor, pubsubTopic, contentTopic, startTime, endTime, hashes, queryRowCallback
+    cursorv2, cursorv3, pubsubTopic, contentTopic, startTime, endTime, hashes,
+    queryRowCallback,
   )
   dbStmt.dispose()
 

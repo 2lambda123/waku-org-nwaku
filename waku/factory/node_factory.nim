@@ -19,6 +19,7 @@ import
   ../waku_dnsdisc,
   ../waku_archive,
   ../waku_store,
+  ../waku_store_legacy,
   ../waku_filter_v2,
   ../waku_peer_exchange,
   ../node/peer_manager,
@@ -251,6 +252,12 @@ proc setupProtocols(
     except CatchableError:
       return err("failed to mount waku store protocol: " & getCurrentExceptionMsg())
 
+    try:
+      await mountLegacyStore(node)
+    except CatchableError:
+      return
+        err("failed to mount waku legacy store protocol: " & getCurrentExceptionMsg())
+
   mountStoreClient(node)
   if conf.storenode != "":
     let storeNode = parsePeerInfo(conf.storenode)
@@ -258,6 +265,14 @@ proc setupProtocols(
       node.peerManager.addServicePeer(storeNode.value, WakuStoreCodec)
     else:
       return err("failed to set node waku store peer: " & storeNode.error)
+
+  mountLegacyStoreClient(node)
+  if conf.storenode != "":
+    let storeNode = parsePeerInfo(conf.storenode)
+    if storeNode.isOk():
+      node.peerManager.addServicePeer(storeNode.value, WakuLegacyStoreCodec)
+    else:
+      return err("failed to set node waku legacy store peer: " & storeNode.error)
 
   # NOTE Must be mounted after relay
   if conf.lightpush:

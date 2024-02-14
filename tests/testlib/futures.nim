@@ -13,8 +13,8 @@ proc newPushHandlerFuture*(): Future[(string, WakuMessage)] =
 proc newBoolFuture*(): Future[bool] =
   newFuture[bool]()
 
-proc newHistoryFuture*(): Future[HistoryQuery] =
-  newFuture[HistoryQuery]()
+proc newHistoryFuture*(): Future[StoreQueryRequest] =
+  newFuture[StoreQueryRequest]()
 
 proc toResult*[T](future: Future[T]): Result[T, string] =
   if future.cancelled():

@@ -5,7 +5,7 @@ else:
 
 import ../../../waku_core, ../../common
 
-type DbCursor* = (Timestamp, seq[byte], PubsubTopic)
+type DbCursor* = (Timestamp, seq[byte], PubsubTopic, WakuMessageHash)
 
 proc toDbCursor*(c: ArchiveCursor): DbCursor =
-  (c.storeTime, @(c.digest.data), c.pubsubTopic)
+  (c.storeTime, @(c.digest.data), c.pubsubTopic, c.hash)
