@@ -14,7 +14,6 @@ import
 import
   ../../../waku_core,
   ../../../waku_store_legacy/common,
-  ../../../waku_filter,
   ../../../waku_filter_v2,
   ../../../waku_lightpush/common,
   ../../../waku_relay,
