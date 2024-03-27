@@ -350,7 +350,7 @@ proc whereClause(
   )
 
 proc selectMessagesWithLimitQuery(
-    table: string, where: Option[string], limit: uint, ascending = true
+    table: string, where: Option[string], limit: uint, ascending = true, v3 = false
 ): SqlQueryStr =
   let order = if ascending: "ASC" else: "DESC"
 
@@ -363,7 +363,14 @@ proc selectMessagesWithLimitQuery(
   if where.isSome():
     query &= " WHERE " & where.get()
 
-  query &= " ORDER BY storedAt " & order & ", messageHash " & order
+  query &= " ORDER BY storedAt " & order
+
+  # either order by messageHash (v3) or digest (v2)
+  if v3:
+    query &= ", messageHash " & order
+  else:
+    query &= ", id " & order
+
   query &= " LIMIT " & $limit & ";"
 
   return query
@@ -537,7 +544,7 @@ proc selectMessagesByHistoryQueryWithLimit*(
     let where = whereClause(
       cursorState, pubsubTopic, contentTopic, startTime, endTime, hashes, ascending
     )
-    selectMessagesWithLimitQuery(DbTable, where, limit, ascending)
+    selectMessagesWithLimitQuery(DbTable, where, limit, ascending, cursorv3.isSome())
 
   let dbStmt = ?db.prepareStmt(query)
   ?dbStmt.execSelectMessagesWithLimitStmt(
