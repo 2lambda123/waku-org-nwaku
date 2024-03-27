@@ -749,7 +749,7 @@ proc query*(
 
   let queryRes = await node.wakuLegacyStoreClient.query(query, peer)
   if queryRes.isErr():
-    return err($queryRes.error)
+    return err("legacy store client query error: " & $queryRes.error)
 
   let response = queryRes.get()
 
@@ -821,7 +821,7 @@ proc toArchiveQuery(request: StoreQueryRequest): ArchiveQuery =
 
 proc toStoreResult(res: ArchiveResult): StoreQueryResult =
   let response = res.valueOr:
-    return err(StoreError.new(300, $error))
+    return err(StoreError.new(300, "archive error: " & $error))
 
   var res = StoreQueryResponse()
 
@@ -872,7 +872,7 @@ proc query*(
     return err("waku store v3 client is nil")
 
   let response = (await node.wakuStoreClient.query(request, peer)).valueOr:
-    return err($error)
+    return err("store client query error: " & $error)
 
   return ok(response)
 

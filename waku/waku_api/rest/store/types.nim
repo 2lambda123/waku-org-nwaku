@@ -33,13 +33,9 @@ proc parseHash*(input: Option[string]): Result[Option[WakuMessageHash], string] 
   let base64Encoded = decodeUrl(base64UrlEncoded)
 
   let decodedBytes = base64.decode(Base64String(base64Encoded)).valueOr:
-    return err(error)
+    return err("waku message hash parsing error: " & error)
 
-  var data: array[32, byte]
-  let byteCount = copyFrom(data, decodedBytes)
-  assert(byteCount == 32)
-
-  let hash: WakuMessageHash = data
+  let hash: WakuMessageHash = fromBytes(decodedBytes)
 
   return ok(some(hash))
 

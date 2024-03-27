@@ -59,7 +59,7 @@ proc parseTime(input: Option[string]): Result[Option[Timestamp], string] =
       if time > 0:
         return ok(some(Timestamp(time)))
     except ValueError:
-      return err("Problem parsing time [" & getCurrentExceptionMsg() & "]")
+      return err("time parsing error: " & getCurrentExceptionMsg())
 
   return ok(none(Timestamp))
 
@@ -69,7 +69,7 @@ proc parseIncludeData(input: Option[string]): Result[bool, string] =
     try:
       includeData = parseBool(input.get())
     except ValueError:
-      return err("Problem parsing include data [" & getCurrentExceptionMsg() & "]")
+      return err("include data parsing error: " & getCurrentExceptionMsg())
 
   return ok(includeData)
 
@@ -124,7 +124,7 @@ proc createStoreQuery(
     try:
       parsedPagedSize = some(uint64(parseInt(pageSize.get())))
     except CatchableError:
-      return err("Problem parsing page size [" & getCurrentExceptionMsg() & "]")
+      return err("page size parsing error: " & getCurrentExceptionMsg())
 
   return ok(
     StoreQueryRequest(

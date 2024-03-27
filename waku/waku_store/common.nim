@@ -13,10 +13,7 @@ const
 
   MaxPageSize*: uint64 = 100
 
-  EmptyCursor*: WakuMessageHash = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0,
-  ]
+  EmptyCursor*: WakuMessageHash = EmptyWakuMessageHash
 
 type WakuStoreResult*[T] = Result[T, string]
 
