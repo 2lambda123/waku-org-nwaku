@@ -285,24 +285,21 @@ proc combineClauses(clauses: varargs[Option[string]]): Option[string] =
     where &= " AND " & clause
   return some(where)
 
-proc whereClause(
-    cursor: Option[bool], # true v3, false v2
+proc whereClausev2(
+    cursor: bool,
     pubsubTopic: Option[PubsubTopic],
     contentTopic: seq[ContentTopic],
     startTime: Option[Timestamp],
     endTime: Option[Timestamp],
-    hashes: seq[WakuMessageHash],
     ascending: bool,
 ): Option[string] =
   let cursorClause =
-    if cursor.isNone():
-      none(string)
-    else:
+    if cursor:
       let comp = if ascending: ">" else: "<"
-      if cursor.get():
-        some("(timestamp, messageHash) " & comp & " (?, ?)")
-      else:
-        some("(storedAt, id) " & comp & " (?, ?)")
+
+      some("(storedAt, id) " & comp & " (?, ?)")
+    else:
+      none(string)
 
   let pubsubTopicClause =
     if pubsubTopic.isNone():
@@ -333,23 +330,11 @@ proc whereClause(
     else:
       some("storedAt <= (?)")
 
-  let hashesClause =
-    if hashes.len <= 0:
-      none(string)
-    else:
-      var where = "messageHash IN ("
-      where &= "?"
-      for _ in 1 ..< hashes.len:
-        where &= ", ?"
-      where &= ")"
-      some(where)
-
   return combineClauses(
-    cursorClause, pubsubTopicClause, contentTopicClause, startTimeClause, endTimeClause,
-    hashesClause,
+    cursorClause, pubsubTopicClause, contentTopicClause, startTimeClause, endTimeClause
   )
 
-proc selectMessagesWithLimitQuery(
+proc selectMessagesWithLimitQueryv2(
     table: string, where: Option[string], limit: uint, ascending = true, v3 = false
 ): SqlQueryStr =
   let order = if ascending: "ASC" else: "DESC"
@@ -363,24 +348,9 @@ proc selectMessagesWithLimitQuery(
   if where.isSome():
     query &= " WHERE " & where.get()
 
-  query &= " ORDER BY storedAt " & order
-
-  # either order by messageHash (v3) or digest (v2)
-  if v3:
-    query &= ", messageHash " & order
-  else:
-    query &= ", id " & order
+  query &= " ORDER BY storedAt " & order & ", id " & order
 
   query &= " LIMIT " & $limit & ";"
-
-  return query
-
-proc selectMessageByHashQuery(): SqlQueryStr =
-  var query: string
-
-  query = "SELECT contentTopic, payload, version, timestamp, messageHash"
-  query &= " FROM " & DbTable
-  query &= " WHERE messageHash = (?)"
 
   return query
 
@@ -391,15 +361,13 @@ proc prepareStmt(
   checkErr sqlite3_prepare_v2(db.env, stmt, stmt.len.cint, addr s, nil)
   return ok(SqliteStmt[void, void](s))
 
-proc execSelectMessagesWithLimitStmt(
+proc execSelectMessagesV2WithLimitStmt(
     s: SqliteStmt,
-    cursorv2: Option[DbCursor],
-    cursorv3: Option[(Timestamp, WakuMessageHash)],
+    cursor: Option[DbCursor],
     pubsubTopic: Option[PubsubTopic],
     contentTopic: seq[ContentTopic],
     startTime: Option[Timestamp],
     endTime: Option[Timestamp],
-    hashes: seq[WakuMessageHash],
     onRowCallback: DataProc,
 ): DatabaseResult[void] =
   let s = RawStmtPtr(s)
@@ -407,14 +375,8 @@ proc execSelectMessagesWithLimitStmt(
   # Bind params
   var paramIndex = 1
 
-  if cursorv3.isSome():
-    let (time, hash) = cursorv3.get()
-    checkErr bindParam(s, paramIndex, time)
-    paramIndex += 1
-    checkErr bindParam(s, paramIndex, toSeq(hash))
-    paramIndex += 1
-  elif cursorv2.isSome(): # cursorv2 = storedAt, id, pubsubTopic
-    let (storedAt, id, _, _) = cursorv2.get()
+  if cursor.isSome():
+    let (storedAt, id, _) = cursor.get()
     checkErr bindParam(s, paramIndex, storedAt)
     paramIndex += 1
     checkErr bindParam(s, paramIndex, id)
@@ -427,10 +389,6 @@ proc execSelectMessagesWithLimitStmt(
 
   for topic in contentTopic:
     checkErr bindParam(s, paramIndex, topic.toBytes())
-    paramIndex += 1
-
-  for hash in hashes:
-    checkErr bindParam(s, paramIndex, toSeq(hash))
     paramIndex += 1
 
   if startTime.isSome():
@@ -488,38 +446,14 @@ proc selectMessagesByHistoryQueryWithLimit*(
     cursor: Option[DbCursor],
     startTime: Option[Timestamp],
     endTime: Option[Timestamp],
-    hashes: seq[WakuMessageHash],
     limit: uint,
     ascending: bool,
 ): DatabaseResult[
     seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)]
 ] =
-  # Store v3 cursor is only the hash of the message
-  # Must first get the message timestamp before paginating by time
-  var cursorv2 = cursor
-  var cursorv3 = none((Timestamp, WakuMessageHash))
-  if cursor.isSome() and cursor.get()[3] != EmptyWakuMessageHash:
-    let hash: WakuMessageHash = cursor.get()[3]
-
-    var wakuMessage: WakuMessage
-
-    proc queryRowCallback(s: ptr sqlite3_stmt) =
-      wakuMessage = queryRowWakuMessageCallback(
-        s, contentTopicCol = 0, payloadCol = 1, versionCol = 2, senderTimestampCol = 3
-      )
-
-    let query = selectMessageByHashQuery()
-    let dbStmt = ?db.prepareStmt(query)
-    ?dbStmt.execSelectMessageByHash(hash, queryRowCallback)
-    dbStmt.dispose()
-
-    let time: Timestamp = wakuMessage.timestamp
-
-    cursorv3 = some((time, hash))
-    cursorv2 = none(DbCursor)
-
   var messages: seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)] =
     @[]
+
   proc queryRowCallback(s: ptr sqlite3_stmt) =
     let
       pubsubTopic = queryRowPubsubTopicCallback(s, pubsubTopicCol = 3)
@@ -533,23 +467,240 @@ proc selectMessagesByHistoryQueryWithLimit*(
     messages.add((pubsubTopic, message, digest, storedAt, hash))
 
   let query = block:
-    let cursorState =
-      if cursorv3.isSome():
-        some(true)
-      elif cursorv2.isSome():
-        some(false)
-      else:
-        none(bool)
-
-    let where = whereClause(
-      cursorState, pubsubTopic, contentTopic, startTime, endTime, hashes, ascending
+    let where = whereClausev2(
+      cursor.isSome(), pubsubTopic, contentTopic, startTime, endTime, ascending
     )
-    selectMessagesWithLimitQuery(DbTable, where, limit, ascending, cursorv3.isSome())
+
+    selectMessagesWithLimitQueryv2(DbTable, where, limit, ascending)
+
+  let dbStmt = ?db.prepareStmt(query)
+  ?dbStmt.execSelectMessagesV2WithLimitStmt(
+    cursor, pubsubTopic, contentTopic, startTime, endTime, queryRowCallback
+  )
+  dbStmt.dispose()
+
+  return ok(messages)
+
+### Store v3 ###
+
+proc selectMessageByHashQuery(): SqlQueryStr =
+  var query: string
+
+  query = "SELECT contentTopic, payload, version, timestamp, messageHash"
+  query &= " FROM " & DbTable
+  query &= " WHERE messageHash = (?)"
+
+  return query
+
+proc whereClause(
+    cursor: bool,
+    pubsubTopic: Option[PubsubTopic],
+    contentTopic: seq[ContentTopic],
+    startTime: Option[Timestamp],
+    endTime: Option[Timestamp],
+    hashes: seq[WakuMessageHash],
+    ascending: bool,
+): Option[string] =
+  let cursorClause =
+    if cursor:
+      let comp = if ascending: ">" else: "<"
+
+      some("(timestamp, messageHash) " & comp & " (?, ?)")
+    else:
+      none(string)
+
+  let pubsubTopicClause =
+    if pubsubTopic.isNone():
+      none(string)
+    else:
+      some("pubsubTopic = (?)")
+
+  let contentTopicClause =
+    if contentTopic.len <= 0:
+      none(string)
+    else:
+      var where = "contentTopic IN ("
+      where &= "?"
+      for _ in 1 ..< contentTopic.len:
+        where &= ", ?"
+      where &= ")"
+      some(where)
+
+  let startTimeClause =
+    if startTime.isNone():
+      none(string)
+    else:
+      some("storedAt >= (?)")
+
+  let endTimeClause =
+    if endTime.isNone():
+      none(string)
+    else:
+      some("storedAt <= (?)")
+
+  let hashesClause =
+    if hashes.len <= 0:
+      none(string)
+    else:
+      var where = "messageHash IN ("
+      where &= "?"
+      for _ in 1 ..< hashes.len:
+        where &= ", ?"
+      where &= ")"
+      some(where)
+
+  return combineClauses(
+    cursorClause, pubsubTopicClause, contentTopicClause, startTimeClause, endTimeClause,
+    hashesClause,
+  )
+
+proc execSelectMessagesWithLimitStmt(
+    s: SqliteStmt,
+    cursor: Option[(Timestamp, WakuMessageHash)],
+    pubsubTopic: Option[PubsubTopic],
+    contentTopic: seq[ContentTopic],
+    startTime: Option[Timestamp],
+    endTime: Option[Timestamp],
+    hashes: seq[WakuMessageHash],
+    onRowCallback: DataProc,
+): DatabaseResult[void] =
+  let s = RawStmtPtr(s)
+
+  # Bind params
+  var paramIndex = 1
+
+  if cursor.isSome():
+    let (time, hash) = cursor.get()
+    checkErr bindParam(s, paramIndex, time)
+    paramIndex += 1
+    checkErr bindParam(s, paramIndex, toSeq(hash))
+    paramIndex += 1
+
+  if pubsubTopic.isSome():
+    let pubsubTopic = toBytes(pubsubTopic.get())
+    checkErr bindParam(s, paramIndex, pubsubTopic)
+    paramIndex += 1
+
+  for topic in contentTopic:
+    checkErr bindParam(s, paramIndex, topic.toBytes())
+    paramIndex += 1
+
+  for hash in hashes:
+    checkErr bindParam(s, paramIndex, toSeq(hash))
+    paramIndex += 1
+
+  if startTime.isSome():
+    let time = startTime.get()
+    checkErr bindParam(s, paramIndex, time)
+    paramIndex += 1
+
+  if endTime.isSome():
+    let time = endTime.get()
+    checkErr bindParam(s, paramIndex, time)
+    paramIndex += 1
+
+  try:
+    while true:
+      let v = sqlite3_step(s)
+      case v
+      of SQLITE_ROW:
+        onRowCallback(s)
+      of SQLITE_DONE:
+        return ok()
+      else:
+        return err($sqlite3_errstr(v))
+  finally:
+    # release implicit transaction
+    discard sqlite3_reset(s) # same return information as step
+    discard sqlite3_clear_bindings(s) # no errors possible
+
+proc selectMessagesWithLimitQuery(
+    table: string, where: Option[string], limit: uint, ascending = true, v3 = false
+): SqlQueryStr =
+  let order = if ascending: "ASC" else: "DESC"
+
+  var query: string
+
+  query =
+    "SELECT storedAt, contentTopic, payload, pubsubTopic, version, timestamp, id, messageHash"
+  query &= " FROM " & table
+
+  if where.isSome():
+    query &= " WHERE " & where.get()
+
+  query &= " ORDER BY storedAt " & order & ", messageHash " & order
+
+  query &= " LIMIT " & $limit & ";"
+
+  return query
+
+proc selectMessagesByStoreQueryWithLimit*(
+    db: SqliteDatabase,
+    contentTopic: seq[ContentTopic],
+    pubsubTopic: Option[PubsubTopic],
+    cursor: Option[WakuMessageHash],
+    startTime: Option[Timestamp],
+    endTime: Option[Timestamp],
+    hashes: seq[WakuMessageHash],
+    limit: uint,
+    ascending: bool,
+): DatabaseResult[
+    seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)]
+] =
+  # Must first get the message timestamp before paginating by time
+  let newCursor =
+    if cursor.isSome() and cursor.get() != EmptyWakuMessageHash:
+      let hash: WakuMessageHash = cursor.get()
+
+      var wakuMessage: WakuMessage
+
+      proc queryRowCallback(s: ptr sqlite3_stmt) =
+        wakuMessage = queryRowWakuMessageCallback(
+          s, contentTopicCol = 0, payloadCol = 1, versionCol = 2, senderTimestampCol = 3
+        )
+
+      let query = selectMessageByHashQuery()
+      let dbStmt = ?db.prepareStmt(query)
+      ?dbStmt.execSelectMessageByHash(hash, queryRowCallback)
+      dbStmt.dispose()
+
+      let time: Timestamp = wakuMessage.timestamp
+
+      some((time, hash))
+    else:
+      none((Timestamp, WakuMessageHash))
+
+  var messages: seq[(PubsubTopic, WakuMessage, seq[byte], Timestamp, WakuMessageHash)] =
+    @[]
+
+  proc queryRowCallback(s: ptr sqlite3_stmt) =
+    let
+      pubsubTopic = queryRowPubsubTopicCallback(s, pubsubTopicCol = 3)
+      message = queryRowWakuMessageCallback(
+        s, contentTopicCol = 1, payloadCol = 2, versionCol = 4, senderTimestampCol = 5
+      )
+      digest = queryRowDigestCallback(s, digestCol = 6)
+      storedAt = queryRowReceiverTimestampCallback(s, storedAtCol = 0)
+      hash = queryRowWakuMessageHashCallback(s, hashCol = 7)
+
+    messages.add((pubsubTopic, message, digest, storedAt, hash))
+
+  let query = block:
+    let where = whereClause(
+      newCursor.isSome(),
+      pubsubTopic,
+      contentTopic,
+      startTime,
+      endTime,
+      hashes,
+      ascending,
+    )
+
+    selectMessagesWithLimitQuery(DbTable, where, limit, ascending, true)
 
   let dbStmt = ?db.prepareStmt(query)
   ?dbStmt.execSelectMessagesWithLimitStmt(
-    cursorv2, cursorv3, pubsubTopic, contentTopic, startTime, endTime, hashes,
-    queryRowCallback,
+    newCursor, pubsubTopic, contentTopic, startTime, endTime, hashes, queryRowCallback
   )
   dbStmt.dispose()
 

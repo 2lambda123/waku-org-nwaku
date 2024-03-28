@@ -720,7 +720,7 @@ proc mountLegacyStore*(node: WakuNode) {.async.} =
         return err(error)
 
     let request = request.toArchiveQuery()
-    let response = await node.wakuArchive.findMessages(request)
+    let response = await node.wakuArchive.findMessagesV2(request)
     return response.toHistoryResult()
 
   node.wakuLegacyStore =
