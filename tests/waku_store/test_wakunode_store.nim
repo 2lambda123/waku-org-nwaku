@@ -315,7 +315,7 @@ procSuite "WakuNode - Store":
     ## Then
     check not queryRes.isOk()
 
-    check queryRes.error == "BAD_REQUEST: invalid cursor"
+    check queryRes.error == "store client query error: BAD_REQUEST: invalid cursor"
 
     # Cleanup
     waitFor allFutures(client.stop(), server.stop())
