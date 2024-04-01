@@ -42,15 +42,13 @@ import
   ./waku_filter_v2/test_all,
   ./waku_peer_exchange/test_all,
   ./waku_lightpush/test_all,
-  ./waku_relay/test_all
+  ./waku_relay/test_all,
+  ./incentivization/test_all
 
 import
   # Waku v2 tests
   ./test_wakunode,
   ./test_wakunode_lightpush,
-  # Waku Filter
-  ./test_waku_filter_legacy,
-  ./test_wakunode_filter_legacy,
   ./test_peer_store_extended,
   ./test_message_cache,
   ./test_peer_manager,
@@ -77,7 +75,6 @@ import
   ./wakunode_rest/test_rest_serdes,
   ./wakunode_rest/test_rest_store,
   ./wakunode_rest/test_rest_filter,
-  ./wakunode_rest/test_rest_legacy_filter,
   ./wakunode_rest/test_rest_lightpush,
   ./wakunode_rest/test_rest_admin,
   ./wakunode_rest/test_rest_cors
