@@ -6,9 +6,7 @@ import
   libp2p/crypto/crypto as libp2p_keys,
   eth/keys as eth_keys
 
-import
-  ../../../waku/[waku_core/topics, waku_enr, waku_discv5, waku_enr/sharding],
-  ../testlib/[common, wakucore]
+import ../../../waku/[waku_enr, waku_discv5, waku_enr/sharding], ../testlib/wakucore
 
 proc newTestEnrRecord*(
     privKey: libp2p_keys.PrivateKey,
