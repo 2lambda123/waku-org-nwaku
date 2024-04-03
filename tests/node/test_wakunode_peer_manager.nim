@@ -32,6 +32,9 @@ import
 const DEFAULT_PROTOCOLS: seq[string] =
   @["/ipfs/id/1.0.0", "/libp2p/autonat/1.0.0", "/libp2p/circuit/relay/0.2.0/hop"]
 
+template chainedComparison(a: untyped, b: untyped, c: untyped): bool =
+  a == b and b == c
+
 let
   listenIp = ValidIpAddress.init("0.0.0.0")
   listenPort = Port(0)
@@ -83,6 +86,7 @@ suite "Peer Manager":
 
       # Then the server should have the client in its peer store
       check:
+        clientPeerStore.peerExists(serverRemotePeerInfo.peerId)
         clientPeerStore.get(serverPeerId).connectedness == Connectedness.Connected
         serverPeerStore.get(clientPeerId).connectedness == Connectedness.Connected
 
@@ -101,8 +105,10 @@ suite "Peer Manager":
       # When a client connects to the non existent peer
       await client.connectToNodes(@[nonExistentRemotePeerInfo])
 
+      # Then the client exists in the peer store but is marked as a failed connection
       let parsedRemotePeerInfo = clientPeerStore.get(nonExistentRemotePeerInfo.peerId)
       check:
+        clientPeerStore.peerExists(nonExistentRemotePeerInfo.peerId)
         parsedRemotePeerInfo.connectedness == CannotConnect
         parsedRemotePeerInfo.lastFailedConn <= Moment.init(getTime().toUnix, Second)
         parsedRemotePeerInfo.numberFailedConn == 1
@@ -133,13 +139,13 @@ suite "Peer Manager":
         check:
           clientPeerStore.peers().len == 1
 
-        # Given the server is marked as not connected
+        # Given the server is marked as CannotConnect
         client.peerManager.peerStore[ConnectionBook].book[serverPeerId] = CannotConnect
 
         # When pruning the client's store
         client.peerManager.prunePeerStore()
 
-        # Then the server is removed from the client's peer store
+        # Then no peers are removed
         check:
           clientPeerStore.peers().len == 1
 
@@ -211,7 +217,7 @@ suite "Peer Manager":
           clientPeerStore.peers().len == 1
 
         # Given the server is marked as not connected
-        # There's only one shard in the ENR so avg shards will be the same as the shard count; hence it will be purged.
+        # (There's only one shard in the ENR so avg shards will be the same as the shard count; hence it will be purged.)
         client.peerManager.peerStore[ConnectionBook].book[serverPeerId] = CannotConnect
 
         # When pruning the client's store
@@ -288,20 +294,20 @@ suite "Peer Manager":
         let
           client2Key = generateSecp256k1Key()
           client3Key = generateSecp256k1Key()
-          # listenIp = ValidIpAddress.init("0.0.0.0")
-          # listenPort = Port(0)
           client2 = newTestWakuNode(client2Key, listenIp, listenPort)
           client3 = newTestWakuNode(client3Key, listenIp, listenPort)
 
         await allFutures(client2.start(), client3.start())
 
-        # And the client's peer manager has a colocation limit of 0
+        # And the server's peer manager has no colocation limit
         server.peerManager.colocationLimit = 0
 
+        # When all clients connect to the server
         await client.connectToNodes(@[serverRemotePeerInfo])
         await client2.connectToNodes(@[serverRemotePeerInfo])
         await client3.connectToNodes(@[serverRemotePeerInfo])
 
+        # Then the server should have all clients in its peer store
         check:
           serverPeerStore.peers().len == 3
 
@@ -313,20 +319,20 @@ suite "Peer Manager":
         let
           client2Key = generateSecp256k1Key()
           client3Key = generateSecp256k1Key()
-          # listenIp = ValidIpAddress.init("0.0.0.0")
-          # listenPort = Port(0)
           client2 = newTestWakuNode(client2Key, listenIp, listenPort)
           client3 = newTestWakuNode(client3Key, listenIp, listenPort)
 
         await allFutures(client2.start(), client3.start())
 
-        # And the client's peer manager has a colocation limit of 0
+        # And the server's peer manager has a colocation limit of 1
         server.peerManager.colocationLimit = 1
 
+        # When all clients connect to the server
         await client.connectToNodes(@[serverRemotePeerInfo])
         await client2.connectToNodes(@[serverRemotePeerInfo])
         await client3.connectToNodes(@[serverRemotePeerInfo])
 
+        # Then the server should have only 1 client in its peer store
         check:
           serverPeerStore.peers().len == 1
 
@@ -334,46 +340,42 @@ suite "Peer Manager":
         await allFutures(client2.stop(), client3.stop())
 
     suite "In-memory Data Structure Verification":
-      # TODO: "peers.db"
       asyncTest "Cannot add self":
         # When trying to add self to the peer store
         client.peerManager.addPeer(clientRemotePeerInfo)
 
-        # Then the peer store should not contain the client
+        # Then the peer store should not contain the peer
         check:
           not clientPeerStore.peerExists(clientPeerId)
 
       asyncTest "Peer stored in peer store":
         # When adding a peer other than self to the peer store
-        serverRemotePeerInfo.enr = some(server.enr)
         client.peerManager.addPeer(serverRemotePeerInfo)
 
         # Then the peer store should contain the peer
-        check clientPeerStore.peerExists(serverPeerId)
-
-        # And all the peer's information should be stored
         check:
+          clientPeerStore.peerExists(serverPeerId)
           clientPeerStore[AddressBook][serverPeerId] == serverRemotePeerInfo.addrs
-          # clientPeerStore[KeyBook][serverPeerId] == serverRemotePeerInfo.publicKey
-          # clientPeerStore[SourceBook][serverPeerId] == UnknownOrigin
-          # clientPeerStore[ProtoBook][serverPeerId] == serverRemotePeerInfo.protocols
-          # clientPeerStore[ENRBook][serverPeerId].raw ==
-          #   serverRemotePeerInfo.enr.get().raw
 
     suite "Protocol-Specific Peer Handling":
       asyncTest "Peer Protocol Support Verification - No waku protocols":
+        # When connecting to a server with no Waku protocols
         await client.connectToNodes(@[serverRemotePeerInfo])
 
+        # Then the stored protocols should be the default (libp2p) ones
         check:
           clientPeerStore.peerExists(serverPeerId)
           clientPeerStore.get(serverPeerId).protocols == DEFAULT_PROTOCOLS
 
       asyncTest "Peer Protocol Support Verification (Before Connection)":
+        # Given the server has mounted some Waku protocols
         await server.mountRelay()
         await server.mountFilter()
 
+        # When connecting to the server
         await client.connectToNodes(@[serverRemotePeerInfo])
 
+        # Then the stored protocols should include the Waku protocols
         check:
           clientPeerStore.peerExists(serverPeerId)
           clientPeerStore.get(serverPeerId).protocols ==
@@ -381,72 +383,45 @@ suite "Peer Manager":
 
       xasyncTest "Peer Protocol Support Verification (After Connection)":
         # TODO: Mounted protocols after connection are not being registered
+        # Given a client is connected to a server
         await client.connectToNodes(@[serverRemotePeerInfo])
 
         check:
           clientPeerStore.peerExists(serverPeerId)
           clientPeerStore.get(serverPeerId).protocols == DEFAULT_PROTOCOLS
 
+        # When the server mounts some Waku protocols (after being connected)
         await server.mountRelay()
         await server.mountFilter()
 
+        # Then the stored protocols should be updated to include the Waku protocols
         check:
           clientPeerStore.peerExists(serverPeerId)
           clientPeerStore.get(serverPeerId).protocols ==
             DEFAULT_PROTOCOLS & @[WakuRelayCodec, WakuFilterSubscribeCodec]
 
       xasyncTest "Service-Specific Peer Addition":
-        # echo "\n\n"
-        # echo serverRemotePeerInfo.protocols
-        # echo server.switch.peerInfo.toRemotePeerInfo().protocols
-        # await server.mountRelay()
-        # echo serverRemotePeerInfo.protocols
-        # echo server.switch.peerInfo.toRemotePeerInfo().protocols
-        # echo "\n\n"
+        # Given a server mounts some Waku protocols
+        await server.mountFilter()
 
+        # And another server that mounts different Waku protocols
         let
           server2Key = generateSecp256k1Key()
           server2 = newTestWakuNode(server2Key, listenIp, listenPort)
-
-        let
           server2RemotePeerInfo = server2.switch.peerInfo.toRemotePeerInfo()
           server2PeerId = server2RemotePeerInfo.peerId
+
         await server2.mountRelay()
         await server2.start()
-        # await server2.mountFilter()
-        await server2.mountRelay()
 
-        await sleepAsync(3.seconds)
+        # When connecting to both servers
+        await client.connectToNodes(@[serverRemotePeerInfo, server2RemotePeerInfo])
 
-        # echo "~~~~~~~~"
-        # echo clientPeerStore.get(serverPeerId).protocols
-        # # echo serverRemotePeerInfo.protocols
-        # # echo server.switch.peerInfo.toRemotePeerInfo().protocols
-        # echo "~"
-        # await client.connectToNodes(@[serverRemotePeerInfo])
-        # echo "~"
-        # echo clientPeerStore.get(serverPeerId).protocols
-        # echo serverRemotePeerInfo.protocols
-        # echo server.switch.peerInfo.toRemotePeerInfo().protocols
-        echo "~~~~~~~~"
-        # await client.connectToNodes(@[server.switch.peerInfo.toRemotePeerInfo()])
-        # await client.connectToNodes(@[server2.switch.peerInfo.toRemotePeerInfo()])
-        echo clientPeerStore.get(server2PeerId).protocols
-        # echo server2RemotePeerInfo.protocols
-        # echo server2.switch.peerInfo.toRemotePeerInfo().protocols
-        echo "~"
-        await client.connectToNodes(@[server2RemotePeerInfo])
-        echo "~"
-        echo clientPeerStore.get(server2PeerId).protocols
-        # echo server2RemotePeerInfo.protocols
-        # echo server2.switch.peerInfo.toRemotePeerInfo().protocols
-        echo "~~~~~~~~"
-
+        # Then the peer store should contain both peers with the correct protocols
         check:
-          # clientPeerStore.peerExists(serverPeerId)
-          # clientPeerStore.get(serverPeerId).protocols ==
-          #   DEFAULT_PROTOCOLS & @[WakuRelayCodec]
-
+          clientPeerStore.peerExists(serverPeerId)
+          clientPeerStore.get(serverPeerId).protocols ==
+            DEFAULT_PROTOCOLS & @[WakuFilterSubscribeCodec]
           clientPeerStore.peerExists(server2PeerId)
           clientPeerStore.get(server2PeerId).protocols ==
             DEFAULT_PROTOCOLS & @[WakuRelayCodec]
@@ -455,9 +430,6 @@ suite "Peer Manager":
         await server2.stop()
 
     suite "Tracked Peer Metadata":
-      template chainedComparison(a: untyped, b: untyped, c: untyped): bool =
-        a == b and b == c
-
       xasyncTest "Metadata Recording":
         # When adding a peer other than self to the peer store
         serverRemotePeerInfo.enr = some(server.enr)
@@ -519,7 +491,7 @@ suite "Peer Manager":
           )
 
       xasyncTest "Metadata Accuracy":
-        # Given a peer other than self is added to the peer store
+        # Given a second server
         let
           server2Key = generateSecp256k1Key()
           server2 = newTestWakuNode(server2Key, listenIp, listenPort)
@@ -531,11 +503,7 @@ suite "Peer Manager":
         # When the client connects to both servers
         await client.connectToNodes(@[serverRemotePeerInfo, server2RemotePeerInfo])
 
-        echo serverRemotePeerInfo.addrs
-        echo server2RemotePeerInfo.addrs
-        echo clientPeerStore[AddressBook][serverPeerId]
-        echo clientPeerStore[AddressBook][server2PeerId]
-        # Then the peer store should contain the peers
+        # Then the peer store should contain both peers with the correct metadata
         check:
           # Server
           clientPeerStore[AddressBook][serverPeerId] == serverRemotePeerInfo.addrs
@@ -597,16 +565,16 @@ suite "Peer Manager":
             server2RemotePeerInfo.protocols,
             DEFAULT_PROTOCOLS,
           )
-          # chainedComparison(
-          #   clientPeerStore[AgentBook][server2PeerId], # FIXME: Not assigned
-          #   server2RemotePeerInfo.agent,
-          #   "nim-libp2p/0.0.1",
-          # )
-          # chainedComparison(
-          #   clientPeerStore[ProtoVersionBook][server2PeerId], # FIXME: Not assigned
-          #   server2RemotePeerInfo.protoVersion,
-          #   "ipfs/0.1.0",
-          # )
+          chainedComparison(
+            clientPeerStore[AgentBook][server2PeerId], # FIXME: Not assigned
+            server2RemotePeerInfo.agent,
+            "nim-libp2p/0.0.1",
+          )
+          chainedComparison(
+            clientPeerStore[ProtoVersionBook][server2PeerId], # FIXME: Not assigned
+            server2RemotePeerInfo.protoVersion,
+            "ipfs/0.1.0",
+          )
           clientPeerStore[KeyBook][serverPeerId] == server2RemotePeerInfo.publicKey
           chainedComparison(
             clientPeerStore[ConnectionBook][server2PeerId],
@@ -754,18 +722,19 @@ proc cleanupDb() =
 
 suite "Persistence Check":
   asyncTest "PeerStorage exists":
+    # Cleanup previous existing db
+    cleanupDb()
+
     # Given an on-disk peer db exists, with a peer in it
     let
       clientPeerStorage = newTestWakuPeerStorage(some(baseDbPath))
       serverKey = generateSecp256k1Key()
       clientKey = generateSecp256k1Key()
-      # listenIp = ValidIpAddress.init("0.0.0.0")
-      # listenPort = Port(0)
       server = newTestWakuNode(serverKey, listenIp, listenPort)
-      serverPeerStore = server.peerManager.peerStore
       client = newTestWakuNode(
         clientKey, listenIp, listenPort, peerStorage = clientPeerStorage
       )
+      serverPeerStore = server.peerManager.peerStore
       clientPeerStore = client.peerManager.peerStore
 
     await allFutures(server.start(), client.start())
@@ -776,7 +745,7 @@ suite "Persistence Check":
 
     await allFutures(server.stop(), client.stop())
 
-    # When initializing a new client with the same peer storage
+    # When initializing a new client using the prepopulated on-disk storage
     let
       newClientPeerStorage = newTestWakuPeerStorage(some(baseDbPath))
       newClient = newTestWakuNode(
@@ -795,21 +764,19 @@ suite "Persistence Check":
     cleanupDb()
 
   asyncTest "PeerStorage exists but no data":
-    # Given no peer db exists
+    # Cleanup previous existing db
     cleanupDb()
 
-    # When creating a new server, and a client with on-disk peer storage
+    # When creating a new server with memory storage, and a client with on-disk peer storage
     let
       clientPeerStorage = newTestWakuPeerStorage(some(baseDbPath))
       serverKey = generateSecp256k1Key()
       clientKey = generateSecp256k1Key()
-      # listenIp = ValidIpAddress.init("0.0.0.0")
-      # listenPort = Port(0)
       server = newTestWakuNode(serverKey, listenIp, listenPort)
-      serverPeerStore = server.peerManager.peerStore
       client = newTestWakuNode(
         clientKey, listenIp, listenPort, peerStorage = clientPeerStorage
       )
+      serverPeerStore = server.peerManager.peerStore
       clientPeerStore = client.peerManager.peerStore
 
     await allFutures(server.start(), client.start())
@@ -823,15 +790,13 @@ suite "Persistence Check":
     cleanupDb()
 
   asyncTest "PeerStorage not exists":
-    # When creating a new server and client without peer storage
+    # When creating a new server and client, both without peer storage
     let
       serverKey = generateSecp256k1Key()
       clientKey = generateSecp256k1Key()
-      # listenIp = ValidIpAddress.init("0.0.0.0")
-      # listenPort = Port(0)
       server = newTestWakuNode(serverKey, listenIp, listenPort)
-      serverPeerStore = server.peerManager.peerStore
       client = newTestWakuNode(clientKey, listenIp, listenPort)
+      serverPeerStore = server.peerManager.peerStore
       clientPeerStore = client.peerManager.peerStore
 
     await allFutures(server.start(), client.start())
