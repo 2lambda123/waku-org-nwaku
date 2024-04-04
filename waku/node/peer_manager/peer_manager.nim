@@ -193,7 +193,6 @@ proc connectRelay*(
       waku_node_conns_initiated.inc(labelValues = [source])
 
       pm.peerStore[NumberFailedConnBook][peerId] = 0
-
       return true
 
   # Dial failed
@@ -386,6 +385,7 @@ proc onPeerMetadata(pm: PeerManager, peerId: PeerId) {.async.} =
 
 # called when a peer i) first connects to us ii) disconnects all connections from us
 proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
+  echo "# onPeerEvent"
   if not pm.wakuMetadata.isNil() and event.kind == PeerEventKind.Joined:
     await pm.onPeerMetadata(peerId)
 
@@ -394,6 +394,7 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
 
   case event.kind
   of Joined:
+    echo "# onPeerEvent: Joined"
     direction = if event.initiator: Outbound else: Inbound
     connectedness = Connected
 
@@ -410,6 +411,7 @@ proc onPeerEvent(pm: PeerManager, peerId: PeerId, event: PeerEvent) {.async.} =
           asyncSpawn(pm.switch.disconnect(peerId))
           pm.peerStore.delete(peerId)
   of Left:
+    echo "# onPeerEvent: Left"
     direction = UnknownDirection
     connectedness = CanConnect
 
@@ -496,6 +498,7 @@ proc new*(
     onConnEvent(pm, peerId, event)
 
   proc peerHook(peerId: PeerId, event: PeerEvent): Future[void] {.gcsafe.} =
+    echo "# peerHook: ", event.kind, " | ", peerId
     onPeerEvent(pm, peerId, event)
 
   proc peerStoreChanged(peerId: PeerId) {.gcsafe.} =
@@ -546,13 +549,15 @@ proc reconnectPeers*(
 ) {.async.} =
   ## Reconnect to peers registered for this protocol. This will update connectedness.
   ## Especially useful to resume connections from persistent storage after a restart.
-
+  echo "# reconnectPeers"
   trace "Reconnecting peers", proto = proto
 
   # Proto is not persisted, we need to iterate over all peers.
   for peerInfo in pm.peerStore.peers(protocolMatcher(proto)):
+    echo "# reconnectPeers: peer"
     # Check that the peer can be connected
     if peerInfo.connectedness == CannotConnect:
+      echo "# reconnectPeers: cannotconnect"
       error "Not reconnecting to unreachable or non-existing peer",
         peerId = peerInfo.peerId
       continue
@@ -573,12 +578,14 @@ proc reconnectPeers*(
       backoffTime = backoffTime
 
     # TODO: This blocks the whole function. Try to connect to another peer in the meantime.
+    echo "# reconnectPeers: ", backoffTime.seconds(), " - ", ZeroDuration.seconds()
     if backoffTime > ZeroDuration:
+      echo "# reconnectPeers: backoffing"
       trace "Backing off before reconnect...",
         peerId = peerInfo.peerId, backoffTime = backoffTime
       # We disconnected recently and still need to wait for a backoff period before connecting
       await sleepAsync(backoffTime)
-
+    echo "# reconnectPeers: dialing"
     discard await pm.connectRelay(peerInfo)
 
 ####################

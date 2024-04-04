@@ -628,7 +628,7 @@ suite "Peer Manager":
       suite "Automatic Reconnection":
         xasyncTest "Automatic Reconnection Implementation":
           await server.mountRelay()
-          # await client.mountRelay()
+          await client.mountRelay()
 
           # await client.connectToNodes(@[serverRemotePeerInfo])
 
